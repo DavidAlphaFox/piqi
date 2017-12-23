@@ -310,7 +310,7 @@ let try_parse_varint buf =
 
 
 (* TODO, XXX: check signed overflow *)
-(* TODO: optimize for little-endian achitecture *)
+(* TODO: optimize for little-endian architecture *)
 let parse_fixed32 buf =
   try
     let res = ref 0l in
@@ -798,7 +798,7 @@ let parse_default binobj =
   buf
 
 
-(* XXX, NOTE: using default with requried or optional-default fields *)
+(* XXX, NOTE: using default with required or optional-default fields *)
 let parse_required_field code parse_value ?default l =
   let res, rem = find_field code l in
   match res with
@@ -922,16 +922,6 @@ let parse_packed_repeated_array32_field code parse_packed_value parse_value l =
 
 let parse_packed_repeated_array64_field code parse_packed_value parse_value l =
   parse_packed_repeated_array_fixed_field 8 code parse_packed_value parse_value l
-
-
-let parse_flag code l =
-  let res, rem = find_field code l in
-  match res with
-    | None -> false, l
-    | Some x ->
-        (match parse_bool_field x with
-          | true -> true, rem
-          | false -> error x "invalid encoding for a flag")
 
 
 let parse_list_elem parse_value (code, x) =
@@ -1493,12 +1483,6 @@ let gen_packed_repeated_array64_field code f l =
   let size = 8 * Array.length l in
   let contents = iol_known_size size (map_a2l f l) in
   gen_packed_repeated_field_common code contents
-
-
-let gen_flag code x =
-  match x with
-    | false -> iol [] (* no flag *)
-    | true -> gen_bool_field code true
 
 
 let gen_record code contents =

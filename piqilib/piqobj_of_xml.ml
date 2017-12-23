@@ -128,6 +128,7 @@ and parse_any xml_elem =
         let typename_obj, rem = parse_optional_field "type" `string None rem in
         let protobuf_obj, rem = parse_optional_field "protobuf" `binary None rem in
         let xml_obj, rem = parse_optional_field "xml" `any None rem in
+        let piq_obj, rem = parse_optional_field "piq" `string None rem in
         (* issue warnings on unparsed fields *)
         List.iter handle_unknown_field rem;
         let typename =
@@ -145,11 +146,19 @@ and parse_any xml_elem =
             | Some (`any {Any.xml_ast = xml_ast}) -> xml_ast
             | _ -> None
         in
+        let piq_ast =
+          match piq_obj with
+            | Some (`string x) ->
+                let piq_ast = !Piqobj.piq_of_string x in
+                Some piq_ast
+            | _ -> None
+        in
         Any.({
           Piqobj.default_any with
           typename = typename;
           pb = protobuf;
           xml_ast = xml_ast;
+          piq_ast = piq_ast;
         })
     | _ -> (* regular symbolic piqi-any *)
         Any.({
@@ -178,25 +187,8 @@ and parse_record t xml_elem =
 
 
 and parse_field loc (accu, rem) t =
-  let fields, rem =
-    match t.T.Field.piqtype with
-      | None -> do_parse_flag t rem
-      | Some _ -> do_parse_field loc t rem
-  in
+  let fields, rem = do_parse_field loc t rem in
   (List.rev_append fields accu, rem)
-
-
-and do_parse_flag t l =
-  let open T.Field in
-  let name = some_of t.name in (* flag name is always defined *)
-  debug "do_parse_flag: %s\n" name;
-  let res, rem = find_flags name l in
-  match res with
-    | [] -> [], rem
-    | x::tail ->
-        check_duplicate name tail;
-        let res = F.({t = t; obj = None}) in
-        [res], rem
 
 
 and do_parse_field loc t l =
@@ -241,18 +233,6 @@ and find_fields (name:string) (l:xml_elem list) :(xml_elem list * xml_elem list)
   aux [] [] l
 
 
-(* find flags by name, return found flags and remaining fields *)
-and find_flags (name:string) (l:xml_elem list) :(string list * xml_elem list) =
-  let rec aux accu rem = function
-    | [] -> List.rev accu, List.rev rem
-    | (n, [])::t when n = name -> aux (n::accu) rem t
-    | (n, _)::t when n = name ->
-        error n ("value can not be specified for flag " ^ U.quote n)
-    | h::t -> aux accu (h::rem) t
-  in
-  aux [] [] l
-
-
 and parse_optional_field name field_type default l =
   let res, rem = find_fields name l in
   match res with
@@ -267,7 +247,7 @@ and parse_optional_field name field_type default l =
 and parse_repeated_field name field_type l =
   let res, rem = find_fields name l in
   match res with
-    | [] -> [], rem (* allowing repeated field to be acutally missing *)
+    | [] -> [], rem (* allowing repeated field to be actually missing *)
     | l ->
         let res = List.map (parse_obj field_type) l in
         res, rem

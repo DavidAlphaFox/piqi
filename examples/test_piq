@@ -20,7 +20,7 @@ $PIQI check $f.piq
 
 
 # convert to "piq" encoding and print to stdout. "piq" encoding is used as
-# default ouput encoding. Input encoding is determined by file's extension
+# default output encoding. Input encoding is determined by file's extension
 # unless specified explicitly.
 $PIQI convert $f.piq
 
@@ -97,3 +97,7 @@ $PIQI convert -t pib $f.piq.json
 
 # convert .pib back to .json
 $PIQI convert -t json $f.piq.json.pib
+
+
+# convert to json encoding, with extended piqi-any
+$PIQI convert --gen-extended-piqi-any -t json $f.piq

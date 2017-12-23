@@ -91,13 +91,16 @@ and gen_any x =
     let json = make_json_field "json" (Piqobj.json_of_any x) (fun json_ast ->
       json_ast)
     in
+    let piq = make_json_field "piq" (Piqobj.piq_of_any x) (fun piq_ast ->
+      `String (!Piqobj.string_of_piq piq_ast))
+    in
     `Assoc (
       (* this field indicates that this is an extended piqi-any representation
        * (it is necessary for detecting which variant of piqi-any represenation
        * is used and to make either representation automatically reversible) *)
       ("piqi_type", `String "piqi-any") ::
       (* actual content *)
-      (typename @ protobuf @ json)
+      (typename @ protobuf @ json @ piq)
     )
 
 
@@ -118,7 +121,7 @@ and gen_field fields t =
           let f = List.find pred fields in
           let res =
             match f.obj with
-               | None -> make_name name (* flag *)
+               | None -> assert false  (* flag must be resolved to true or false by now *)
                | Some obj -> make_named name (gen_obj obj)
           in [res]
         with

@@ -162,10 +162,12 @@ let full_piqi_typename x =
         else
           let piqi = get_parent_piqi def in
           let parent_name = some_of piqi.P.modname in
-          parent_name ^ "/" ^ name
+          if name = "piq-node" && parent_name = "embedded/piq"
+          then "piq"
+          else parent_name ^ "/" ^ name
     | _ -> (* built-in type *)
         (* XXX: normally built-in types should be used at the time when this
-         * funciton is used *)
+         * function is used *)
         name
 
 

@@ -99,6 +99,7 @@ and parse_any (x:json) :Piqobj.any =
         let typename_obj, rem = parse_optional_field "type" `string None rem in
         let protobuf_obj, rem = parse_optional_field "protobuf" `binary None rem in
         let json_obj, rem = parse_optional_field "json" `any None rem in
+        let piq_obj, rem = parse_optional_field "piq" `string None rem in
         (* issue warnings on unparsed fields *)
         List.iter handle_unknown_field rem;
         let typename =
@@ -116,11 +117,19 @@ and parse_any (x:json) :Piqobj.any =
             | Some (`any {Any.json_ast = json_ast}) -> json_ast
             | _ -> None
         in
+        let piq_ast =
+          match piq_obj with
+            | Some (`string x) ->
+                let piq_ast = !Piqobj.piq_of_string x in
+                Some piq_ast
+            | _ -> None
+        in
         Any.({
           Piqobj.default_any with
           typename = typename;
           pb = protobuf;
           json_ast = json_ast;
+          piq_ast = piq_ast;
         })
     | json_ast -> (* regular symbolic piqi-any *)
         (* TODO: preserve the original int, float and string literals -- see
@@ -153,25 +162,8 @@ and do_parse_record loc t l =
 
 
 and parse_field loc (accu, rem) t =
-  let fields, rem =
-    match t.T.Field.piqtype with
-      | None -> do_parse_flag t rem
-      | Some _ -> do_parse_field loc t rem
-  in
+  let fields, rem = do_parse_field loc t rem in
   (List.rev_append fields accu, rem)
-
-
-and do_parse_flag t l =
-  let open T.Field in
-  let name = some_of t.json_name in
-  debug "do_parse_flag: %s\n" name;
-  let res, rem = find_flags name l in
-  match res with
-    | [] -> [], rem
-    | [x] ->
-        let res = F.({t = t; obj = None}) in
-        [res], rem
-    | _::o::_ -> error_duplicate o name
 
 
 and do_parse_field loc t l =
@@ -215,19 +207,6 @@ and find_fields (name:string) (l:(string*json) list) :(json list * (string*json)
   aux [] [] l
 
 
-(* find flags by name, return found flags and remaining fields *)
-and find_flags (name:string) (l:(string*json) list) :(string list * (string*json) list) =
-  let rec aux accu rem = function
-    | [] -> List.rev accu, List.rev rem
-    | (n, `Bool true)::t when n = name -> aux (n::accu) rem t
-    | (n, `Null ())::t when n = name -> aux accu rem t (* skipping *)
-    | (n, _)::t when n = name ->
-        error n ("value can not be specified for flag " ^ U.quote n)
-    | h::t -> aux accu (h::rem) t
-  in
-  aux [] [] l
-
-
 and parse_optional_field name field_type default l =
   let res, rem = find_fields name l in
   match res with
@@ -242,7 +221,7 @@ and parse_optional_field name field_type default l =
 and parse_repeated_field name field_type l =
   let res, rem = find_fields name l in
   match res with
-    | [] -> [], rem (* XXX: allowing repeated field to be acutally missing *)
+    | [] -> [], rem (* XXX: allowing repeated field to be actually missing *)
     | [`List l] ->
         let res = List.map (parse_obj field_type) l in
         res, rem

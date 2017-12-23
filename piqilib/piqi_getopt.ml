@@ -215,9 +215,9 @@ let parse_word_arg s =
   then
     Piq_lexer.Word s
   else
-    (* Raw binary -- just a sequence of bytes: may be parsed as binary or utf8
+    (* Raw string -- just a sequence of bytes: may be parsed as binary or utf8
      * string *)
-    Piq_lexer.Raw_binary s
+    Piq_lexer.Raw_string s
 
 
 let parse_name_arg s =
@@ -227,7 +227,7 @@ let parse_name_arg s =
   then (
     let s = Bytes.of_string s in
     Bytes.set s 0 '.'; (* replace '-' with '.' to turn it into a Piq name *)
-    Piq_lexer.Word (Bytes.unsafe_to_string s)
+    Piq_lexer.Name (Bytes.unsafe_to_string s)
   )
   else error ("invalid name: " ^ U.quote s)
 
@@ -258,9 +258,9 @@ let parse_arg s =
     | s when s.[0] = '@' ->
         let filename = String.sub s 1 (len - 1) in
         let content = read_file filename in
-        (* Raw binary -- just a sequence of bytes: may be parsed as either
+        (* Raw string -- just a sequence of bytes: may be parsed as either
          * binary or utf8 string *)
-        Piq_lexer.Raw_binary content
+        Piq_lexer.Raw_string content
 
     (* parsing long options starting with "--"
      *
@@ -307,7 +307,7 @@ let parse_argv start =
               (* creating Piq name: '.' followed by the letter *)
               let word = Bytes.create 2 in
               Bytes.set word 0 '.'; Bytes.set word 1 c;
-              let tok = Piq_lexer.Word (Bytes.unsafe_to_string word) in
+              let tok = Piq_lexer.Name (Bytes.unsafe_to_string word) in
               (make_token i tok) :: (aux (j+1))
           | _ ->
               error i ("invalid single-letter argument: " ^ Char.escaped c)
@@ -351,7 +351,7 @@ let argv_start_index = ref 0
 
 (* find the position of the first argument after "--" *)
 let rest_fun arg =
-  if !argv_start_index = 0 (* first argument after first occurence of "--" *)
+  if !argv_start_index = 0 (* first argument after first occurrence of "--" *)
   then argv_start_index := !Arg.current + 1
   else ()
 
@@ -387,6 +387,7 @@ let parse_args (piqtype: T.piqtype) (args: piq_ast list) :Piqobj.obj =
           let loc = (getopt_filename, 0, 1) in
           Piqloc.addlocret loc res
   in
+  let ast = Piq_parser.expand ast in
   let piqobj = U.with_bool Config.piq_relaxed_parsing true
     (fun () -> Piqobj_of_piq.parse_obj piqtype ast)
   in

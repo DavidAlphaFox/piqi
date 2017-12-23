@@ -351,7 +351,7 @@ let format_ast (x :piq_ast) =
     | `uint (x, "") -> make_atom (uint64_to_string x)
     | `float (x, "") -> make_atom (format_float x)
 
-    | `ascii_string (s, "") | `utf8_string (s, "") ->
+    | `string (s, "") ->
         make_atom (quote (Piq_lexer.escape_string s))
     | `binary (s, "") ->
         make_atom (quote (Piq_lexer.escape_binary s))
@@ -360,11 +360,10 @@ let format_ast (x :piq_ast) =
     | `int (_, s)
     | `uint (_, s)
     | `float (_, s) -> make_atom s
-    | `ascii_string (_, s)
-    | `utf8_string (_, s)
+    | `string (_, s)
     | `binary (_, s) -> make_atom (quote s)
 
-    | `raw_binary s ->
+    | `raw_string s ->
         (* This literal can't be read back reliably after printing, and it
          * doesn't come from Piq, but we still need to print it somehow -- in
          * case if it is present. *)
@@ -422,7 +421,12 @@ let format_ast (x :piq_ast) =
                   | `name s -> "." ^ s
                   | `typename s -> ":" ^ s
               in
-              make_form name (map_aux args)
+              if Piq_ast.is_infix_form form_name args
+              then
+                let name = name ^ "*" in
+                make_label (make_atom name) (make_list (map_aux args))
+              else
+                make_form name (map_aux args)
           | ast -> (* this is an ast element in parenthesis *)
               make_parens (aux ast)
         )

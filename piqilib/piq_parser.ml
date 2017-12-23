@@ -81,8 +81,7 @@ let piq_addrefret dst (src :piq_ast) =
     | `uint x -> f x
     | `float x -> f x
     | `bool x -> f x
-    | `ascii_string x -> f x
-    | `utf8_string x -> f x
+    | `string x -> f x
     | `binary x -> f x
     | `word x -> f x
     | `text x -> f x
@@ -92,7 +91,7 @@ let piq_addrefret dst (src :piq_ast) =
     | `typed x -> f x
     | `list x -> f x
     | `form x -> f x
-    | `raw_binary x -> f x
+    | `raw_string x -> f x
     | `any _ ->
         assert false
   
@@ -181,7 +180,7 @@ let expand_names (x: piq_ast) :piq_ast =
       | `list l ->
           `list (List.map aux l)
       | `form (name, args) ->
-          (* at this stage, after we've run expand_forms, this can not be a
+          (* at this stage, after we've run expand_splices, this can not be a
            * named or typed form, so leaving name without a transformation *)
           `form (name, List.map aux args)
       | _ ->
@@ -221,8 +220,8 @@ let cons_named_or_typed name v =
         cons_typed n v
 
 
-(* expand named and typed forms *)
-let expand_forms (x: piq_ast) :piq_ast =
+(* expand named and typed splices *)
+let expand_splices (x: piq_ast) :piq_ast =
   let rec aux0 obj =
     match obj with
       | `form (name, args) when args = [] ->
@@ -260,19 +259,21 @@ let expand_forms (x: piq_ast) :piq_ast =
            *)
           obj
       | `list l ->
-          if List.exists (function `form (`name _, _) | `form (`typename _, _) -> true | _ -> false) l
-          then
-            (* expand and splice the results of named and typed form expansion *)
-            `list (U.flatmap expand_list_elem l)
-          else
-            (* process inner elements *)
-            `list (List.map aux l)
+          `list (expand_list l)
       | _ ->
           obj
+  and expand_list l =  (* small optimization *)
+    if List.exists (function `form (`name _, _) | `form (`typename _, _) -> true | _ -> false) l
+    then
+      (* expand and splice the results of named and typed form expansion *)
+      U.flatmap expand_list_elem l
+    else
+      (* process inner elements *)
+      List.map aux l
   and expand_list_elem = function
     | `form ((`name _) as name, args) | `form ((`typename _) as name, args) when args <> [] ->
-        let expanded_form = List.map (cons_named_or_typed name) args in
-        List.map aux expanded_form
+        let args = expand_list args in
+        List.map (cons_named_or_typed name) args
     | x ->
         [aux x]
   and aux obj =
@@ -282,13 +283,13 @@ let expand_forms (x: piq_ast) :piq_ast =
 
 (* expand built-in syntax abbreviations *)
 let expand x =
-  (* expand (...) when possible *)
-  let x = expand_forms x in
+  (* expand (.foo ...) or .foo* [ ... ] when possible *)
+  let x = expand_splices x in
   (* expand multi-component names *)
   let x = expand_names x in
   (*
     (* check if expansion produces correct location bindings *)
-    let x = expand_forms x in
+    let x = expand_splices x in
     let x = expand_names x in
   *)
   x
@@ -298,9 +299,8 @@ let make_string loc str_type s raw_s =
   let value = (s, raw_s) in
   let res =
     match str_type with
-      | L.String_a -> `ascii_string value
+      | L.String_a | L.String_u -> `string value
       | L.String_b -> `binary value
-      | L.String_u -> `utf8_string value
   in
   Piqloc.addloc loc value;
   Piqloc.addloc loc s;
@@ -314,7 +314,7 @@ let retry_parse_uint s =
 let parse_uint s =
   (* NOTE:
    * OCaml doesn't support large unsingned decimal integer literals. For
-   * intance, this call failes with exception (Failure "int_of_string"):
+   * instance, this call failes with exception (Failure "int_of_string"):
    *
    *      Int64.of_string (Printf.sprintf "%Lu" 0xffff_ffff_ffff_ffffL)
    *
@@ -377,7 +377,7 @@ let parse_number s =
  * a simple piq parser
  *)
 
-let read_next ?(expand_abbr=true) (fname, lexstream) =
+let read_next ?(skip_trailing_comma=false) (fname, lexstream) =
   let location = ref (0,0) in
   let loc () =
     let line, col = !location in
@@ -404,20 +404,18 @@ let read_next ?(expand_abbr=true) (fname, lexstream) =
     | L.String (t, s, raw_s) ->
         let loc = loc () in
         make_string loc t s raw_s
-    | L.Word s when s.[0] = '.' -> (* name part of the named pair *)
-        parse_named_or_typed s make_named ~chain
-    | L.Word s when s.[0] = ':' -> (* typename part of the typed pair *)
-        parse_named_or_typed s make_typed ~chain
+    | L.Name s ->
+        parse_named_or_typed s ~chain
     | L.Word s ->
         let word_loc = loc () in
         Piqloc.addloc word_loc s;
         let res = parse_word s in
         Piqloc.addlocret word_loc res
-    | L.Raw_binary s ->
+    | L.Raw_string s ->
         (* Used in pretty-printing mode and in some other cases, similar to
          * String, but we don't parse it -- just pass it through. *)
         Piqloc.addloc (loc ()) s;
-        Piqloc.addret (`raw_binary s)
+        Piqloc.addret (`raw_string s)
     | L.Text text -> 
         let text_loc = loc () in
         let (fname, line, col) = text_loc in
@@ -426,6 +424,8 @@ let read_next ?(expand_abbr=true) (fname, lexstream) =
         let text_loc = (fname, line - 1, col) in
         Piqloc.addloc text_loc text;
         Piqloc.addret (`text text)
+    | L.Star -> error "unexpected *"
+    | L.Comma -> error "unexpected ,"
     | L.EOF -> error "unexpected end of input"
 
   (* TODO, XXX: move this functionality to the lexer *)
@@ -453,18 +453,15 @@ let read_next ?(expand_abbr=true) (fname, lexstream) =
              * them into `typed and `named *)
             parse_common t ~chain:false
     in
-    (* parse form args *)
-    let rec aux accu =
-      let t = next_token () in
-      match t with
-        | L.Rpar -> List.rev accu
-        | _ -> aux ((parse_common t)::accu)
-    in
-    let args = aux [] in
+    (* parse form args unil ) *)
+    let args = parse_elements L.Rpar in
     (* check that this is one of `typename, `name or `word and for example not a
      * number *)
     (match name with
-      | #Piq_ast.form_name -> () (* this is valid form *)
+      | #Piq_ast.form_name as form_name ->
+          (* this is a valid form *)
+          if Piq_ast.is_infix_form form_name args
+          then C.warning form_name "this style of named expansion form is deprecated, use <name>* [...] instead"
       | obj when args <> [] ->
           C.error obj
             "invalid form name: only words, names and typenames are allowed"
@@ -474,7 +471,7 @@ let read_next ?(expand_abbr=true) (fname, lexstream) =
            * and to be consisten with "identity" forms like (.foo) *)
           ()
     );
-    (* contruct a resulting form from name and args *)
+    (* construct a resulting form from name and args *)
     let pair = (name, args) in
     let res = `form pair in
     Piqloc.addloc startloc pair;
@@ -502,18 +499,44 @@ let read_next ?(expand_abbr=true) (fname, lexstream) =
       | _ when len > 1 && s.[0] = '-' && s.[1] >= '0' && s.[1] <= '9' -> parse_number s
       | _ -> `word s (* just a word *)
 
-  and parse_named_or_typed s make_f ~chain =
+  and parse_named_or_typed s ~chain =
     let loc = loc () in
     (* cut the first character which is '.' or ':' *)
     let n = String.sub s 1 (String.length s - 1) in
     Piqloc.addloc loc n;
 
-    let value =
-      if chain
-      then parse_named_part ()
-      else None
+    let make_named_or_typed n value =
+      if s.[0] = '.'
+      then make_named n value
+      else make_typed n value  (* s.[0] = ':' *)
     in
-    let res = make_f n value in
+
+    let res =
+      if not chain  (* inside of parsing a ( ... ) form *)
+      then (
+        make_named_or_typed n None
+      )
+      else if peek_token () = L.Star
+      then  (  (* parsing infix form: .name * [ ... ] *)
+        junk_token ();
+        if next_token () <> L.Lbr
+        then error "[ expected after .<name> *"
+        else (
+          let name = make_named_or_typed n None in
+          (* parse list elements until ] *)
+          let args = parse_elements L.Rbr in
+          (* construct a resulting form from name and args *)
+          let pair = (name, args) in
+          let res = `form pair in
+          Piqloc.addloc loc pair;
+          res
+        )
+      )
+      else (  (* regular named or typed *)
+        let value = parse_named_part () in
+        make_named_or_typed n value
+      )
+    in
     (*
     let res = expand_obj_names res in
     *)
@@ -523,9 +546,10 @@ let read_next ?(expand_abbr=true) (fname, lexstream) =
     let t = peek_token () in
     match t with
       (* name delimiters *)
-      | L.Word s when s.[0] = '.' || s.[0] = ':' -> (* other name or type *)
+      | L.Name s -> (* other name or type *)
           None
       | L.Rbr | L.Rpar (* closing parenthesis or bracket *)
+      | L.Comma
       | L.EOF -> (* end of input *)
           None
       (* something else *)
@@ -534,15 +558,24 @@ let read_next ?(expand_abbr=true) (fname, lexstream) =
 
   and parse_list () =
     let startloc = loc () in
+    (* parse list elements until ] *)
+    let l = parse_elements L.Rbr in
+    let res = `list l in
+    Piqloc.addloc startloc l;
+    Piqloc.addret res
+
+  and parse_elements closing_token =
+    let parse_element t =
+      let node = parse_common t in
+      (* skip an optional comma *)
+      if peek_token () = L.Comma then junk_token ();
+      node
+    in
     let rec aux accu =
       let t = next_token () in
-      match t with
-        | L.Rbr -> 
-            let l = List.rev accu in
-            let res = `list l in
-            Piqloc.addloc startloc l;
-            Piqloc.addret res
-        | _ -> aux ((parse_common t)::accu)
+      if t = closing_token
+      then List.rev accu
+      else aux ((parse_element t)::accu)
     in aux []
   in
   let parse_top () =
@@ -551,11 +584,9 @@ let read_next ?(expand_abbr=true) (fname, lexstream) =
       | L.EOF -> None
       | _ ->
           let ast = parse_common t in
-          let res =
-            if expand_abbr
-            then expand ast (* expand built-in syntax abbreviations *)
-            else ast (* return as it is *)
-          in Some res
+          (* skip an optional trailing comma *)
+          if skip_trailing_comma && peek_token () = L.Comma then junk_token ();
+          Some ast
   in
   try parse_top ()
   with L.Error (s, (line, col)) ->
@@ -563,11 +594,12 @@ let read_next ?(expand_abbr=true) (fname, lexstream) =
     error_at (fname, line, col) s
 
 
-let read_all ?(expand_abbr=true) piq_parser =
+let read_all piq_parser =
   let rec aux accu =
-    match read_next piq_parser ~expand_abbr with
+    match read_next piq_parser ~skip_trailing_comma:true with
       | None -> List.rev accu
-      | Some x -> aux (x::accu)
+      | Some x ->
+          aux (x::accu)
   in aux []
 
 

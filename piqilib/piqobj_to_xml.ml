@@ -90,15 +90,18 @@ and gen_any x =
     let protobuf = make_xml_field "protobuf" (Piqobj.pb_of_any x) (fun pb ->
       [`Data (Piqi_base64.encode pb)])
     in
-    let json = make_xml_field "xml" (Piqobj.xml_of_any x) (fun xml_list ->
+    let xml = make_xml_field "xml" (Piqobj.xml_of_any x) (fun xml_list ->
       xml_list)
+    in
+    let piq = make_xml_field "piq" (Piqobj.piq_of_any x) (fun piq_ast ->
+      [`Data (!Piqobj.string_of_piq piq_ast)])
     in
     (* this field indicates that this is an extended piqi-any representation
      * (it is necessary for detecting which variant of piqi-any represenation
      * is used and to make either representation automatically reversible) *)
     `Elem ("piqi-type", [`Data "piqi-any"]) ::
     (* actual content *)
-    (typename @ protobuf @ json)
+    (typename @ protobuf @ xml @ piq)
 
 
 and gen_record x =
@@ -115,11 +118,11 @@ and gen_field fields t =
   (* find all fields of the given type *)
   let fields = List.find_all (fun f -> f.t == t) fields in
   (* generate fields *)
-  List.map (fun f -> gen_obj_element name f.obj) fields
+  List.map (fun f -> gen_field_obj_element name f.obj) fields
 
 
-and gen_obj_element name = function
-  | None -> make_element name [] (* empty element *)
+and gen_field_obj_element name = function
+  | None -> assert false  (* flag must be resolved to true or false by now *)
   | Some obj -> make_element name (gen_obj obj)
 
 
@@ -132,7 +135,12 @@ and gen_variant x =
 and gen_option x =
   let open O in
   let name = C.name_of_option x.t in
-  gen_obj_element name x.obj
+  gen_option_obj_element name x.obj
+
+
+and gen_option_obj_element name = function
+  | None -> make_element name [] (* empty element *)
+  | Some obj -> make_element name (gen_obj obj)
 
 
 and gen_enum x =

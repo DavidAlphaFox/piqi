@@ -53,7 +53,7 @@ let pre_process_piqi ~fname ?ast piqi =
   piqi.P.is_embedded <- Some true;
 
   (* can't process it right away, because not all dependencies could be loaded
-   * already; this is expecially ciritical in case of mutually-recursive
+   * already; this is especially ciritical in case of mutually-recursive
    * includes; just do bare minimum so that we could add to Piqi_db and process
    * it later *)
   let piqi = Piqi.pre_process_piqi piqi ~fname ?ast in
@@ -61,7 +61,7 @@ let pre_process_piqi ~fname ?ast piqi =
   (* so that we could find it by name later *)
   Piqi_db.add_piqi piqi;
 
-  (* preserve location information so that exising location info for Piqi
+  (* preserve location information so that existing location info for Piqi
    * modules won't be discarded by subsequent Piqloc.reset() calls *)
   Piqloc.preserve ();
 
@@ -109,8 +109,9 @@ let get_current_piqtype user_piqtype locref =
       error locref "type of object is unknown"
 
 
-let read_piq_ast piq_parser user_piqtype :piq_ast = if not !Piqi_config.piq_frameless_input  (* regular (framed) mode *) then
-    match Piq_parser.read_next piq_parser with
+let read_piq_ast ~skip_trailing_comma piq_parser user_piqtype :piq_ast =
+  if not !Piqi_config.piq_frameless_input  (* regular (framed) mode *) then
+    match Piq_parser.read_next piq_parser ~skip_trailing_comma with
       | Some ast -> ast
       | None -> raise EOF
   else  (* frameless mode *)
@@ -144,9 +145,8 @@ let piqi_of_piq fname ast =
   pre_process_piqi piqi ~fname ~ast
 
 
-let load_piq (user_piqtype: T.piqtype option) piq_parser :obj =
-  let ast = read_piq_ast piq_parser user_piqtype in
-  let fname, _ = piq_parser in (* TODO: improve getting a filename from parser *)
+let load_piq_from_ast (user_piqtype: T.piqtype option) ast :obj =
+  let fname = "" in
   match ast with
     | `typename typename ->
         (* (:typename) *)
@@ -177,6 +177,12 @@ let load_piq (user_piqtype: T.piqtype option) piq_parser :obj =
           Piqobj obj
 
 
+let load_piq (user_piqtype: T.piqtype option) ?(skip_trailing_comma=false) piq_parser :obj =
+  let ast = read_piq_ast piq_parser user_piqtype ~skip_trailing_comma in
+  let ast = Piq_parser.expand ast in
+  load_piq_from_ast user_piqtype ast
+
+
 let original_piqi piqi =
   let orig_piqi = some_of piqi.P.original_piqi in
   (* make sure that the module's name is set *)
@@ -196,8 +202,8 @@ let piqi_to_piq piqi =
   piqi_ast_to_piq piqi_ast
 
 
-let gen_piq (obj :obj) =
-  Piqloc.pause (); (* no need to preserve location information here *)
+let gen_piq ?(preserve_loc=false) (obj :obj) =
+  if not preserve_loc then Piqloc.pause (); (* no need to preserve location information here *)
   let f () =
     match obj with
       | Piqtype typename ->
@@ -210,7 +216,7 @@ let gen_piq (obj :obj) =
           Piqobj_to_piq.gen_obj obj
   in
   let res = U.with_bool Piqobj_to_piq.is_external_mode true f in
-  Piqloc.resume ();
+  if not preserve_loc then Piqloc.resume ();
   res
 
 
@@ -532,6 +538,8 @@ let gen_json obj =
   let piqi_typename, json = gen_json_common obj ~plain:false in
   (* adding "piqi_type": name as a first field of the serialized JSON object *)
   match json with
+    | `Assoc (("piqi_type", _) :: _) ->  (* already generated for piqi-any objects in --gen-extended-piqi-any mode *)
+        json
     | `Assoc l ->
         let piqi_type = ("piqi_type", `String piqi_typename) in
         `Assoc (piqi_type :: l)

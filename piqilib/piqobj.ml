@@ -154,6 +154,12 @@ let default_any =
   })
 
 
+let rec unalias (obj: Piqobj.obj) =
+  match obj with
+    | `alias x -> unalias x.Alias.obj
+    | _ -> obj
+
+
 (* store Piqobj.any and return reference of the stored object in Piqi_objstore
  *)
 let put_any (any: Piqobj.any) :int =
@@ -172,6 +178,25 @@ let put_any (any: Piqobj.any) :int =
 (* find Piqobj.any by reference in Piqi_objstore *)
 let get_any (ref: int) :Piqobj.any =
   Piqi_objstore.get ref
+
+
+let make_piqi_any_from_obj ?typename (obj: Piqobj.obj) =
+  let any = Any.({
+    default_any with
+    obj = Some obj;
+    typename = typename;
+  })
+  in
+  (* cache the value in objstore and in the piqi_any itself *)
+  let ref = put_any any in
+  C.debug "Piqobj.make_any_from_obj: creating new any with ref %d\n" ref;
+
+  let piqi_any = Piqi_impl_piqi.Any.({
+    (Piqi_impl_piqi.default_any ()) with
+    ref = Some ref;
+    typename = typename;
+  }) in
+  piqi_any
 
 
 let any_of_piqi_any (piqi_any: Piqi_impl_piqi.any) :Piqobj.any =
@@ -224,14 +249,19 @@ let of_xml = ref of_xml
  * TODO: find a better module for these functions *)
 let json_of_string (x:string) :Piqi_json_type.json = assert false
 let xml_of_string  (x:string) :Piqi_xml_type.xml list = assert false
+let piq_of_string  (x:string) :Piq_ast.ast = assert false
 
 let string_of_json (x :Piqi_json_type.json) :string = assert false
 let string_of_xml  (x :Piqi_xml_type.xml) :string = assert false
+let string_of_piq  (x :Piq_ast.ast) :string = assert false
 
 let json_of_string = ref json_of_string
 let xml_of_string  = ref xml_of_string
+let piq_of_string  = ref piq_of_string
+
 let string_of_json = ref string_of_json
 let string_of_xml  = ref string_of_xml
+let string_of_piq  = ref string_of_piq
 
 
 let of_any (piqtype: Piqi_impl_piqi.piqtype) (any :Piqobj.any) :Piqobj.obj option =
@@ -263,10 +293,14 @@ let resolve_obj ?(piqtype: Piqi_impl_piqi.piqtype option) (any :Piqobj.any) :uni
   then () (* already resolved *)
   else (
     let do_resolve_obj piqtype =
-      (* cache typename
+      (* XXX: cache typename -- disabling for now, because it breaks
+       * reversibility -- why add an extra typename?
+       *
        * XXX: do not use fully qualified names for locally defined types? *)
+      (*
       if any.typename = None
       then any.typename <- Some (C.full_piqi_typename piqtype);
+      *)
 
       let obj = of_any piqtype any in
       any.obj <- obj

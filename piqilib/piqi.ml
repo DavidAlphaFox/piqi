@@ -32,6 +32,8 @@ let is_boot_mode = ref true
 let piqi_lang_def :T.piqtype ref = ref `bool
 (* resolved type definition for the Piqi specification *)
 let piqi_spec_def :T.piqtype ref = ref `bool
+(* resolved type definition for the Piq AST node specification *)
+let piq_def :T.piqtype ref = ref `bool
 
 (* resolved "typedef" type definition
  * Will be appropriately initialized during boot stage (see below) *)
@@ -45,6 +47,7 @@ let import_def :T.piqtype ref = ref `bool
 (* loaded in boot () -- see below *)
 let piqi_spec :T.piqi option ref = ref None
 let piqi_lang :T.piqi option ref = ref None
+let piq_spec :T.piqi option ref = ref None
 
 let is_boot_piqi piqi =
   match !piqi_spec with
@@ -68,6 +71,9 @@ let register_processing_hook (f :idtable -> T.piqi -> unit) =
 
   debug "register_processing_hook(1.6)\n";
   f idtable (some_of !piqi_spec);
+
+  debug "register_processing_hook(1.7)\n";
+  f idtable (some_of !piq_spec);
 
   debug "register_processing_hook(1)\n";
   (* add the hook to the list of registered hooks *)
@@ -559,38 +565,54 @@ let add_fake_loc (obj :Piqobj.obj) =
         ()
 
 
+let resolve_default_value piqi_any piqtype =
+  assert_loc ();
+  debug_loc "resolve_default_value(0)";
+
+  let any = Piqobj.any_of_piqi_any piqi_any in
+  Piqobj.resolve_obj any ~piqtype;
+
+  (* make sure we add fake locations for the default values of the
+   * embedded self-specifications; currently, there's only one such value
+   * which is field.mode = required *)
+  if !is_boot_mode
+  then add_fake_loc (some_of any.Piqobj.Any.obj);
+
+  (* NOTE: fixing (preserving) location counters which get skewed during
+   * parsing defaults *)
+  Piqloc.icount := !Piqloc.ocount;
+  debug_loc "resolve_default_value(1)";
+  ()
+
+
 let resolve_field_default x =
   let open F in
   match x.default, x.piqtype with
     | None, _ -> () (* no default *)
     | Some piqi_any, Some piqtype ->
-        assert_loc ();
-        debug_loc "resolve_default_value(0)";
-
-        let any = Piqobj.any_of_piqi_any piqi_any in
-
         debug "resolve_field_default: %s\n" (C.name_of_field x);
-        Piqobj.resolve_obj any ~piqtype;
+        resolve_default_value piqi_any piqtype
+    | _ ->
+        assert false
 
-        (* make sure we add fake locations for the default values of the
-         * embedded self-specifications; currently, there's only one such value
-         * which is field.mode = required *)
-        if !is_boot_mode
-        then add_fake_loc (some_of any.Piqobj.Any.obj);
 
-        (* NOTE: fixing (preserving) location counters which get skewed during
-         * parsing defaults *)
-        Piqloc.icount := !Piqloc.ocount;
-        debug_loc "resolve_default_value(1)";
-        ()
+let resolve_field_piq_flag_default x =
+  let open F in
+  match x.piq_flag_default, x.piqtype with
+    | None, _ -> () (* no default *)
+    | Some piqi_any, Some piqtype ->
+        debug "resolve_field_default: %s\n" (C.name_of_field x);
+        resolve_default_value piqi_any piqtype
     | _ ->
         assert false
 
 
 let resolve_defaults = function
   | `record x ->
-      List.iter resolve_field_default x.R.field
-  | _ -> ()
+      List.iter resolve_field_default x.R.field;
+      List.iter resolve_field_piq_flag_default x.R.field
+  | _ ->
+      ()
 
 
 let copy_obj (x:'a) :'a =
@@ -638,6 +660,28 @@ let copy_defs ?(copy_parts=true) defs = List.map (copy_def ~copy_parts) defs
 let copy_imports l = List.map copy_obj l
 
 
+let transform_flag x =
+  let open F in
+
+  if x.typename = None
+  then (
+    x.typename <- Some "bool";
+    x.default <- Some (Piqobj.make_piqi_any_from_obj (`bool false));
+  );
+
+  if x.typename = Some "bool" && x.piq_flag_default = None
+  then (
+    x.piq_flag_default <- Some (Piqobj.make_piqi_any_from_obj (`bool true));
+  )
+
+
+let transform_flags = function
+  | `record x ->
+      List.iter transform_flag x.R.field
+  | _ ->
+      ()
+
+
 let resolve_defs ~piqi idtable (defs:T.typedef list) =
   (*
   (* a fresh copy of defs is needed, since we can't alter the original ones:
@@ -646,6 +690,12 @@ let resolve_defs ~piqi idtable (defs:T.typedef list) =
 
   (* check definitions validity *)
   List.iter check_def defs;
+
+  (* transform piq flags (i.e. .name ... .optional) into boolean fields:
+   *
+   *   .name ... .optional .type bool .default false .piq-flag-default true
+   *)
+  List.iter transform_flags defs;
 
   (* add definitions to the map: def name -> def *)
   let idtable = add_typedefs idtable defs in
@@ -679,8 +729,8 @@ let check_defs ~piqi idtable defs =
 
 
 let read_piqi_common fname piq_parser :piq_ast =
-  (* don't expand abbreviations until we construct the containing object *)
-  let res = Piq_parser.read_all piq_parser ~expand_abbr:false in
+  (* NOTE: not expanding abbreviations until we construct the containing object *)
+  let res = Piq_parser.read_all piq_parser in
 
   if res = []
   then piqi_warning ("piqi file is empty: " ^ fname);
@@ -779,7 +829,7 @@ let mlobj_to_piqobj piqtype wire_generator mlobj =
   let binobj = Piqirun.gen_binobj wire_generator mlobj in
   debug_loc "mlobj_to_piqobj(1.5)";
 
-  (* dont' resolve defaults when reading wire *)
+  (* don't' resolve defaults when reading wire *)
   let piqobj =
     U.with_bool C.is_inside_parse_piqi true
     (fun () ->
@@ -961,7 +1011,7 @@ let apply_extensions obj obj_def obj_parse_f obj_gen_f extension_entries custom_
   (* Piqloc.trace := false; *)
   debug "apply_extensions(0)\n";
   let obj_ast = mlobj_to_ast obj_def obj_gen_f obj in
-  let extension_asts = List.map Piqobj.piq_of_piqi_any extension_entries in
+  let extension_asts = List.map (fun x -> Piq_parser.expand (Piqobj.piq_of_piqi_any x)) extension_entries in
 
   let override l =
     if not override
@@ -975,7 +1025,7 @@ let apply_extensions obj obj_def obj_parse_f obj_gen_f extension_entries custom_
         ) extension_asts
       in
       (*
-      List.iter (Printf.eprintf "extesion label: %s\n") extension_labels;
+      List.iter (Printf.eprintf "extension label: %s\n") extension_labels;
       *)
       let is_overridden = function
           | `named x ->
@@ -1194,7 +1244,7 @@ let apply_defs_extensions defs extensions custom_fields =
   list_of_idtable idtable defs C.typedef_name
 
 
-(* partition extensions into typedef extesions, function extensions and import
+(* partition extensions into typedef extensions, function extensions and import
  * extensions *)
 let partition_extensions extensions =
   let open Extend in
@@ -1230,7 +1280,7 @@ let get_imported_defs imports =
 
 
 let make_param_name func param_name =
-  (* construct the type name as a concatentation of the function name and
+  (* construct the type name as a concatenation of the function name and
    * -input|output|error *)
   let func_name = func.T.Func.name in
   let type_name = func_name ^ "-" ^ param_name in
@@ -1314,7 +1364,7 @@ let resolve_param func param_name param =
 
 (* return func, [(def, (def_name, set_f))], where
  *
- * [def] is a definition derived from the function's input/output/erorr
+ * [def] is a definition derived from the function's input/output/error
  * parameter
  *
  * [def_name] is the definition's name
@@ -1459,7 +1509,7 @@ let find_piqi_file from_piqi modname =
     in
     (modname, fname)
   else  (* regular module loaded from a .piqi file *)
-    (* add the referee dirname as a .piqi search path in front of the curent
+    (* add the referee dirname as a .piqi search path in front of the current
      * working directory, which is always the first element of the search path
      * list *)
     let dir = Filename.dirname (some_of from_piqi.P.file) in
@@ -1653,7 +1703,7 @@ let rec process_piqi ?modname ?(include_path=[]) ?(fname="") ?(ast: piq_ast opti
   let idtable = Idtable.empty in
   let idtable = add_imported_typedefs idtable imported_defs in
 
-  (* add built-in type defintions to the idtable *)
+  (* add built-in type definitions to the idtable *)
   let idtable =
     if not !Config.flag_no_builtin_types && not !is_boot_mode && not (C.is_self_spec piqi)
     then add_typedefs idtable !C.builtin_typedefs
@@ -1707,7 +1757,7 @@ let rec process_piqi ?modname ?(include_path=[]) ?(fname="") ?(ast: piq_ast opti
         apply_defs_extensions defs defs_extensions custom_fields
     )
   in
-  (* preserve the original defintions by making a copy *)
+  (* preserve the original definitions by making a copy *)
   let resolved_defs = copy_defs extended_defs in
 
   (* set resolved_func.resolved_input/output/error fields to their correspondent
@@ -1738,7 +1788,7 @@ let rec process_piqi ?modname ?(include_path=[]) ?(fname="") ?(ast: piq_ast opti
    * and option codes instead of auto-enumerated ones
    *
    * NOTE: code assignment is needed only for .piqi, Piqi specifications encoded
-   * in other formats must already include explicitly speficied (and correct!)
+   * in other formats must already include explicitly specified (and correct!)
    * wire codes.
    *
    * NOTE: this step must be performed before resolving defaults -- this is
@@ -1747,7 +1797,7 @@ let rec process_piqi ?modname ?(include_path=[]) ?(fname="") ?(ast: piq_ast opti
   if ast <> None && C.is_self_spec piqi
   then Piqi_protobuf.add_hashcodes resolved_defs;
 
-  (* check defs, resolve defintion names to types, assign codes, resolve default
+  (* check defs, resolve definition names to types, assign codes, resolve default
    * fields *)
   let idtable = resolve_defs idtable resolved_defs ~piqi in
 
@@ -1952,7 +2002,7 @@ let find_embedded_piqtype name =
 
 
 (*
- * booting code; preparing the initial statically defined piqi defintions
+ * booting code; preparing the initial statically defined piqi definitions
  *)
 let boot () =
   trace "boot(0)\n";
@@ -1983,6 +2033,7 @@ let boot () =
   piqi_lang_def := find_embedded_piqtype "piqi";
   (* resolved type definition for the Piqi specification *)
   piqi_spec_def := Piqi_db.find_piqtype "embedded/piqi/piqi";
+
   (* resolved "typedef" type definition *)
   typedef_def := find_embedded_piqtype "typedef";
   field_def := find_embedded_piqtype "field";
@@ -1992,6 +2043,16 @@ let boot () =
 
   (* turn boot mode off *)
   is_boot_mode := false;
+
+  (* handle embedded piq spec *)
+  trace "boot_piq(0)\n";
+  let piqi = process_piqi Piqi_boot.piq ~cache:false in
+  piq_spec := Some piqi;
+  (* add the piq spec to the DB under a special name *)
+  piqi.P.modname <- Some "embedded/piq";
+  Piqi_db.add_piqi piqi;
+  piq_def := Piqi_db.find_piqtype "piq";
+  debug "boot_piq(1)\n";
 
   (* resume object location tracking; it was off from the beginning for a reason
    * -- see piqloc.ml for details *)
@@ -2133,7 +2194,7 @@ let expand_piqi ~extensions ~functions piqi =
         res_piqi with
         (* add embedded definitions from function to the list of top-level defs *)
         typedef = res_piqi.typedef @ func_typedefs;
-        (* remove embedded defintions from function parameters *)
+        (* remove embedded definitions from function parameters *)
         func = List.map expand_function res_piqi.func;
       }
   in res_piqi
@@ -2157,7 +2218,13 @@ let expand_piqi ~extensions ~functions piqi =
 let lang_to_spec piqi =
   let open P in
   (* expand includes, extensions and functions *)
-  expand_piqi piqi ~extensions:true ~functions:true
+  let res_piqi = expand_piqi piqi ~extensions:true ~functions:true in
+  (* transform piq flags (i.e. .name ... .optional) into boolean fields:
+   *
+   *   .name ... .optional .type bool .default false .piq-flag-default true
+   *)
+  List.iter transform_flags res_piqi.typedef;
+  res_piqi
 
 
 (* is_external_mode=true means that defaults and potentially other piqi-any
@@ -2211,7 +2278,7 @@ let piqi_to_piqobj
 
   (* include all automatically assigned hash-based codes for fiels and options;
    * this is a protection against changing the hashing algorithm: even if new
-   * piqi versions use a different hashing algorith, previous self-definitions
+   * piqi versions use a different hashing algorithm, previous self-definitions
    * will be still readable *)
   if C.is_self_spec piqi
   then Piqi_protobuf.add_hashcodes piqi_spec.P.typedef
